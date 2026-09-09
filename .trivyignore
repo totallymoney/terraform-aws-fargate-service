@@ -1,0 +1,24 @@
+# Accepted findings, with reasons. Anything not listed here fails CI.
+# Review this file when the modules change.
+
+# AWS-0104 Security group rule allows unrestricted egress to any IP address.
+# The tasks need HTTPS out to pull images, write logs, read secrets and call
+# third party APIs. The rule is limited to port 443; the destination cannot be
+# narrowed without knowing every endpoint the application talks to. Set
+# enable_vpc_endpoints on the network module to keep AWS service traffic inside
+# the VPC, and add narrower rules through additional_egress_rules.
+AWS-0104
+
+# AWS-0053 Load balancer is exposed publicly.
+# This module builds a public web service, so the load balancer is
+# internet facing by default. Reachability is controlled by the security group,
+# which requires alb_ingress_cidrs or alb_ingress_prefix_list_ids and has no
+# default. Set internal = true when traffic arrives over a private link.
+AWS-0053
+
+# AWS-0132 Bucket does not encrypt with a customer managed key.
+# The load balancer access log bucket is SSE-S3. See the note in
+# alb-access-logs.tf: some log delivery paths do not support a customer managed
+# key, and a bucket that silently rejects log writes is worse than one using an
+# AWS managed key.
+AWS-0132
