@@ -1,0 +1,9 @@
+name        = "example-web"
+environment = "test"
+region      = "eu-west-1"
+
+certificate_arn = "arn:aws:acm:eu-west-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"
+container_image = "000000000000.dkr.ecr.eu-west-1.amazonaws.com/example-web@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+# Placeholder. Replace with your CDN's published ranges.
+cdn_ingress_cidrs = ["203.0.113.0/24"]
