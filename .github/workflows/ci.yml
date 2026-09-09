@@ -40,7 +40,7 @@ jobs:
       # Advisory, not blocking. Some findings are accepted by design, for
       # example HTTPS egress from the tasks. Read the report on the pull
       # request rather than treating a clean run as approval.
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
