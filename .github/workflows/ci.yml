@@ -8,15 +8,18 @@ on:
 permissions:
   contents: read
 
+env:
+  TERRAFORM_VERSION: 1.16.2
+
 jobs:
   terraform:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.13.0
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
       - name: Format
@@ -32,10 +35,26 @@ jobs:
             echo "::endgroup::"
           done
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      # Mocked providers, so this needs no AWS account and no credentials.
+      - name: Test
+        run: |
+          terraform init -backend=false -input=false
+          terraform test
+
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Blocking. Findings that are accepted by design are listed with a
       # reason in .trivyignore, so a failure here means something new.

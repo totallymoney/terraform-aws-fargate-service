@@ -176,6 +176,21 @@ resource "aws_ecs_service" "this" {
     rollback = true
   }
 
+  # The circuit breaker catches tasks that fail to start. These alarms catch a
+  # release that starts fine and then serves errors, which the breaker misses.
+  dynamic "alarms" {
+    for_each = var.enable_alarms && var.rollback_on_alarm ? [1] : []
+
+    content {
+      alarm_names = [
+        aws_cloudwatch_metric_alarm.target_5xx_rate[0].alarm_name,
+        aws_cloudwatch_metric_alarm.unhealthy_targets[0].alarm_name,
+      ]
+      enable   = true
+      rollback = true
+    }
+  }
+
   deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
   health_check_grace_period_seconds  = 60

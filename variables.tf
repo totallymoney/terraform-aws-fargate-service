@@ -325,3 +325,48 @@ variable "waf_rate_limit_forwarded_ip_header" {
   EOT
   default     = null
 }
+
+variable "origin_secret_header" {
+  type = object({
+    name  = string
+    value = string
+  })
+  description = <<-EOT
+    Header the CDN adds and the load balancer requires. Requests without it get
+    a 403 before they reach a task.
+
+    Restricting ingress by CDN address range proves a request came from the CDN,
+    not that it came from YOUR distribution. Every customer of that CDN shares
+    the same ranges, so anyone can point their own distribution at your origin.
+    This closes that.
+
+    The value is held in Terraform state. Generate it outside Terraform and read
+    it from your secret store rather than committing it.
+  EOT
+  default     = null
+  sensitive   = true
+}
+
+variable "enable_alarms" {
+  type        = bool
+  description = "Create the service health alarms."
+  default     = true
+}
+
+variable "alarm_topic_arns" {
+  type        = list(string)
+  description = "SNS topics the alarms notify. Pass the topic from the account baseline."
+  default     = []
+}
+
+variable "alarm_5xx_rate_percent" {
+  type        = number
+  description = "Percentage of requests answered with 5xx before the alarm fires."
+  default     = 5
+}
+
+variable "rollback_on_alarm" {
+  type        = bool
+  description = "Roll a deployment back when the load balancer alarms fire. Without this a deployment only rolls back if tasks fail to start, so a release that starts cleanly and then returns errors stays up."
+  default     = true
+}

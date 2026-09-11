@@ -30,6 +30,8 @@ and a CDN that can be walked around, so it is a required input with no default.
 | Area | Resources |
 |---|---|
 | Load balancer | ALB, HTTPS listener on TLS 1.2 minimum, HTTP listener that redirects, target group, security group restricted to the CDN, access logs to S3 with a lifecycle |
+| Origin lock | Optional secret header enforced as a listener rule, so only your CDN distribution reaches the origin, not every customer of that CDN |
+| Alarms | 5xx rate, unhealthy targets, running tasks below the floor. The first two also drive deployment rollback |
 | WAF | Regional web ACL with three AWS managed rule groups and a rate limit, associated to the ALB, logging to CloudWatch with the authorization and cookie headers redacted |
 | Compute | ECS cluster with Container Insights, Fargate task definition, service with a deployment circuit breaker, CPU target tracking autoscaling |
 | Networking | Task security group that accepts traffic from the load balancer only and egresses HTTPS plus DNS inside the VPC |
@@ -111,6 +113,26 @@ Whichever you choose, do not leave the origin open with the intention of
 tightening it later. An origin that accepts traffic from anywhere means the
 CDN's WAF, rate limiting and bot rules are advisory.
 
+**Ranges alone are not enough.** An IP allowlist proves a request came from the
+CDN. It does not prove it came from *your* account with that CDN. Every
+CloudFront distribution shares the same ranges, and Cloudflare is the same
+story, so anyone can point their own distribution at your origin and walk
+straight through the allowlist.
+
+Set `origin_secret_header` to close that. The CDN adds the header, and the
+listener returns 403 to anything without it:
+
+```hcl
+origin_secret_header = {
+  name  = "x-origin-token"
+  value = data.aws_secretsmanager_secret_version.origin.secret_string
+}
+```
+
+It is a listener rule rather than a WAF rule, so it still applies when
+`enable_waf` is false, and it costs nothing. The value does land in Terraform
+state, so generate it outside Terraform and read it from your secret store.
+
 ## Requirements
 
 | Name | Version |
@@ -139,6 +161,11 @@ CDN's WAF, rate limiting and bot rules are advisory.
 | `enable_execute_command` | bool | `false` | A shell in production. Sessions are logged when on |
 | `enable_waf` | bool | `true` | |
 | `waf_rate_limit_forwarded_ip_header` | string | `null` | Set to `X-Forwarded-For` behind a CDN |
+| `origin_secret_header` | object | `null` | `{name, value}`. Requests without it get a 403 |
+| `enable_alarms` | bool | `true` | Service health alarms |
+| `alarm_topic_arns` | list(string) | `[]` | Pass the topic from the account baseline |
+| `alarm_5xx_rate_percent` | number | `5` | |
+| `rollback_on_alarm` | bool | `true` | Roll back a deployment when the load balancer alarms fire |
 | `task_role_policy_json` | string | `null` | What your application code can do |
 | `additional_egress_rules` | list(object) | `[]` | The default is HTTPS out and DNS in the VPC |
 
@@ -185,6 +212,18 @@ worse than one encrypted with an AWS managed key.
 **`desired_count` is ignored after creation.** Autoscaling owns the task count.
 Without `ignore_changes`, every apply would reset the service to the value in
 your configuration and undo whatever scaling had decided.
+
+**Deployment rollback watches metrics, not just process exits.** The circuit
+breaker catches tasks that fail to start. It does not catch a release that
+starts cleanly and then serves 500s. The 5xx rate and unhealthy target alarms
+are wired into the service's deployment alarms so that case rolls back too. The
+running task count alarm is deliberately left out, because an alarm scoped to
+the service cannot be a dependency of the service.
+
+**WAF is on by default.** This module cannot know whether a CDN with its own WAF
+sits in front of it, so it assumes not. If you have one, `enable_waf = false` is
+a reasonable saving of about 9 dollars a month, but only once the origin lock
+above is in place.
 
 **Warnings rather than errors in two places.** The module warns, at plan time, if
 `alb_ingress_cidrs` contains `0.0.0.0/0` or if `container_image` ends in

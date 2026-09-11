@@ -153,9 +153,56 @@ resource "aws_lb_listener" "https" {
   certificate_arn   = var.certificate_arn
   tags              = local.tags
 
-  default_action {
+  # With an origin secret set, the listener refuses by default and the rule
+  # below forwards only the requests that carry the header.
+  dynamic "default_action" {
+    for_each = var.origin_secret_header == null ? [1] : []
+
+    content {
+      type             = "forward"
+      target_group_arn = aws_lb_target_group.this.arn
+    }
+  }
+
+  dynamic "default_action" {
+    for_each = var.origin_secret_header == null ? [] : [1]
+
+    content {
+      type = "fixed-response"
+
+      fixed_response {
+        content_type = "text/plain"
+        message_body = "Forbidden"
+        status_code  = "403"
+      }
+    }
+  }
+}
+
+# An IP allowlist proves a request came from the CDN, not that it came from
+# YOUR CDN account. Every CloudFront distribution shares the same ranges, and
+# Cloudflare is the same story. A shared secret the CDN adds as a header is
+# what actually ties the origin to your distribution.
+#
+# This is a listener rule rather than a WAF rule so it still applies when
+# enable_waf is false, and it costs nothing.
+resource "aws_lb_listener_rule" "origin_secret" {
+  count = var.origin_secret_header == null ? 0 : 1
+
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 1
+  tags         = local.tags
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.this.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = var.origin_secret_header.name
+      values           = [var.origin_secret_header.value]
+    }
   }
 }
 
