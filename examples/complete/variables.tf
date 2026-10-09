@@ -21,9 +21,14 @@ variable "certificate_arn" {
   description = "ACM certificate in the same region as the load balancer."
 }
 
-variable "container_image" {
+variable "web_image" {
   type        = string
-  description = "Image to run. Use a digest or an immutable tag."
+  description = "Image for the web service. Use a digest or an immutable tag."
+}
+
+variable "api_image" {
+  type        = string
+  description = "Image for the api service. Use a digest or an immutable tag."
 }
 
 variable "cdn_ingress_cidrs" {

@@ -4,21 +4,29 @@ A container web service on AWS Fargate, behind an Application Load Balancer,
 behind a CDN. Private subnets, a WAF, scoped IAM roles, access logs and
 autoscaling.
 
-The root module is the service. `modules/network` is a VPC you can use if you
-do not already have one. Use either, or both.
+Three modules. `modules/alb` is one load balancer, certificate, WAF and access
+log bucket. The root module is a service that attaches to it, routed by
+hostname. `modules/network` is a VPC you can use if you do not already have one.
+
+**One load balancer serves many services.** Stand up `modules/alb` once, then
+call the root module for each service with its own hostnames. A fourth service
+is another module block, not another load balancer. At five services that is
+roughly $170 a month less than one load balancer and WAF each.
 
 ## Request flow
 
 ```mermaid
 flowchart LR
   U([Client]) --> C[CDN and its WAF]
-  C -->|443, CDN ranges only| A[ALB<br/>public subnets]
+  C -->|443, CDN ranges only| A[Shared ALB<br/>public subnets]
   A --> W[AWS WAF<br/>managed rules, rate limit]
-  W --> T[Fargate tasks<br/>private subnets]
-  T -->|NAT| I([Outbound APIs])
-  T --> S[(Secrets Manager<br/>or SSM)]
+  W -->|host: www.example.com| T1[web tasks<br/>private subnets]
+  W -->|host: api.example.com| T2[api tasks<br/>private subnets]
+  W -->|no rule matched| X[403]
+  T1 -->|NAT| I([Outbound APIs])
+  T1 --> S[(Secrets Manager<br/>or SSM)]
   A -.access logs.-> B[(S3)]
-  T -.logs.-> L[(CloudWatch Logs)]
+  T1 -.logs.-> L[(CloudWatch Logs)]
 ```
 
 The load balancer security group allows 443 from the CDN's ranges and nothing
@@ -27,12 +35,20 @@ and a CDN that can be walked around, so it is a required input with no default.
 
 ## What it creates
 
+`modules/alb`, once per load balancer:
+
 | Area | Resources |
 |---|---|
-| Load balancer | ALB, HTTPS listener on TLS 1.2 minimum, HTTP listener that redirects, target group, security group restricted to the CDN, access logs to S3 with a lifecycle |
-| Origin lock | Optional secret header enforced as a listener rule, so only your CDN distribution reaches the origin, not every customer of that CDN |
-| Alarms | 5xx rate, unhealthy targets, running tasks below the floor. The first two also drive deployment rollback |
+| Load balancer | ALB, HTTPS listener on TLS 1.2 minimum with a default action that refuses, HTTP listener that redirects, security group restricted to the CDN, access logs to S3 with a lifecycle |
 | WAF | Regional web ACL with three AWS managed rule groups and a rate limit, associated to the ALB, logging to CloudWatch with the authorization and cookie headers redacted |
+
+The root module, once per service:
+
+| Area | Resources |
+|---|---|
+| Routing | Target group, a listener rule claiming this service's hostnames, and one egress rule on the shared security group to this service's tasks |
+| Origin lock | Optional secret header added as a second condition on that rule, so only your CDN distribution reaches the origin, not every customer of that CDN |
+| Alarms | 5xx rate, unhealthy targets, running tasks below the floor. The first two also drive deployment rollback |
 | Compute | ECS cluster with Container Insights, Fargate task definition, service with a deployment circuit breaker, CPU target tracking autoscaling |
 | Networking | Task security group that accepts traffic from the load balancer only and egresses HTTPS plus DNS inside the VPC |
 | Identity | Separate execution and task roles, both with confused deputy conditions, execution role scoped to exactly the secrets in the task definition |
@@ -43,8 +59,8 @@ and a CDN that can be walked around, so it is a required input with no default.
 ## What it deliberately does not do
 
 - **No CDN, no DNS, no certificate.** Those usually sit with whoever owns the
-  domain, often a different team or a different account. Take `alb_dns_name`
-  from the outputs and point your origin at it.
+  domain, often a different team or a different account. Take `dns_name` from
+  the alb module's outputs and point your origin at it.
 - **No database.** Use `task_security_group_id` as the source in your database
   security group rather than a CIDR, so the rule follows the service.
 - **No account baseline.** CloudTrail, GuardDuty, Config and account guardrails
@@ -57,43 +73,86 @@ and a CDN that can be walked around, so it is a required input with no default.
 
 ```hcl
 module "network" {
-  source = "github.com/<your-org>/terraform-aws-fargate-service//modules/network?ref=v0.1.0"
+  source = "github.com/<your-org>/terraform-aws-fargate-service//modules/network?ref=v0.2.0"
 
-  name       = "my-service-prod"
+  name       = "platform-prod"
   cidr_block = "10.0.0.0/16"
 }
 
-module "service" {
-  source = "github.com/<your-org>/terraform-aws-fargate-service?ref=v0.1.0"
+# Once. Every service below shares it.
+module "alb" {
+  source = "github.com/<your-org>/terraform-aws-fargate-service//modules/alb?ref=v0.2.0"
 
-  name   = "my-service-prod"
-  vpc_id = module.network.vpc_id
-
-  public_subnet_ids  = module.network.public_subnet_ids
-  private_subnet_ids = module.network.private_subnet_ids
+  name       = "platform-prod"
+  vpc_id     = module.network.vpc_id
+  subnet_ids = module.network.public_subnet_ids
 
   certificate_arn = aws_acm_certificate.this.arn
-  container_image = "000000000000.dkr.ecr.eu-west-1.amazonaws.com/my-service@sha256:..."
 
   # Only the CDN reaches the origin.
-  alb_ingress_cidrs = local.cdn_ranges
+  ingress_cidrs = local.cdn_ranges
 
   # With a CDN in front, rate limit on the forwarded client address.
   waf_rate_limit_forwarded_ip_header = "X-Forwarded-For"
 }
+
+module "web" {
+  source = "github.com/<your-org>/terraform-aws-fargate-service?ref=v0.2.0"
+
+  name   = "web-prod"
+  vpc_id = module.network.vpc_id
+
+  private_subnet_ids = module.network.private_subnet_ids
+
+  listener_arn          = module.alb.listener_arn
+  alb_security_group_id = module.alb.security_group_id
+  alb_arn_suffix        = module.alb.arn_suffix
+
+  host_headers           = ["www.example.com", "example.com"]
+  listener_rule_priority = 100
+
+  container_image = "000000000000.dkr.ecr.eu-west-1.amazonaws.com/web@sha256:..."
+}
+
+# A second service. Different hostname, different priority, same load balancer.
+module "api" {
+  source = "github.com/<your-org>/terraform-aws-fargate-service?ref=v0.2.0"
+
+  name   = "api-prod"
+  vpc_id = module.network.vpc_id
+
+  private_subnet_ids = module.network.private_subnet_ids
+
+  listener_arn          = module.alb.listener_arn
+  alb_security_group_id = module.alb.security_group_id
+  alb_arn_suffix        = module.alb.arn_suffix
+
+  host_headers           = ["api.example.com"]
+  listener_rule_priority = 200
+
+  container_image = "000000000000.dkr.ecr.eu-west-1.amazonaws.com/api@sha256:..."
+}
 ```
+
+Priorities are evaluated low to high and must be unique on the listener. Leave
+gaps so a service can be inserted later without renumbering the others, which
+would otherwise destroy and recreate rules on a live listener.
+
+A request whose hostname matches no rule gets the listener's default action, a
+403. A hostname pointed at the load balancer before its service exists is
+refused rather than handed to whichever service happens to be first.
 
 See [examples/complete](examples/complete) for a full configuration including
 secrets and a task role.
 
 ## Locking the origin to your CDN
 
-There are three ways to fill `alb_ingress_cidrs`, in descending order of how
-much you should like them.
+There are three ways to fill `ingress_cidrs` on the alb module, in descending
+order of how much you should like them.
 
 1. **A managed prefix list.** If the CDN is CloudFront, use
-   `alb_ingress_prefix_list_ids = ["<id of com.amazonaws.global.cloudfront.origin-facing>"]`
-   and leave `alb_ingress_cidrs` empty. AWS keeps the list current, so there is
+   `ingress_prefix_list_ids = ["<id of com.amazonaws.global.cloudfront.origin-facing>"]`
+   and leave `ingress_cidrs` empty. AWS keeps the list current, so there is
    nothing to maintain and nothing to go stale.
 
 2. **A scheduled job that refreshes the list.** Most CDNs publish their ranges
@@ -142,16 +201,36 @@ state, so generate it outside Terraform and read it from your secret store.
 
 ## Key inputs
 
+### `modules/alb`
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `name` | string | required | Prefix for the load balancer and everything attached |
+| `vpc_id` | string | required | |
+| `subnet_ids` | list(string) | required | At least two AZs |
+| `certificate_arn` | string | required | ACM certificate for the listener |
+| `ingress_cidrs` | list(string) | `[]` | CDN ranges. Set this or the prefix list version |
+| `ingress_prefix_list_ids` | list(string) | `[]` | Managed prefix lists |
+| `additional_certificate_arns` | list(string) | `[]` | Extra certificates for other hostnames |
+| `internal` | bool | `false` | |
+| `enable_waf` | bool | `true` | One WAF covers every service on the load balancer |
+| `waf_rate_limit_forwarded_ip_header` | string | `null` | Set to `X-Forwarded-For` behind a CDN |
+| `unmatched_request_status_code` | string | `"403"` | Returned when no service rule matches |
+| `access_logs_retention_days` | number | `90` | |
+
+### Root module, per service
+
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Prefix for every resource |
 | `vpc_id` | string | required | |
-| `public_subnet_ids` | list(string) | required | Load balancer. At least two AZs |
 | `private_subnet_ids` | list(string) | required | Tasks. No route to an internet gateway |
-| `certificate_arn` | string | required | ACM certificate for the listener |
+| `listener_arn` | string | required | From `module.alb.listener_arn` |
+| `alb_security_group_id` | string | required | From `module.alb.security_group_id` |
+| `alb_arn_suffix` | string | required | From `module.alb.arn_suffix`, for the alarm dimensions |
+| `host_headers` | list(string) | required | Hostnames this service answers on |
+| `listener_rule_priority` | number | required | Unique on the listener. Leave gaps |
 | `container_image` | string | required | Pin a digest or an immutable tag |
-| `alb_ingress_cidrs` | list(string) | `[]` | CDN ranges. Set this or the prefix list version |
-| `alb_ingress_prefix_list_ids` | list(string) | `[]` | Managed prefix lists |
 | `container_port` | number | `8080` | |
 | `cpu` / `memory` | number | `512` / `1024` | Must be a valid Fargate pairing |
 | `cpu_architecture` | string | `X86_64` | `ARM64` costs about 20 percent less if your image supports it |
@@ -159,24 +238,58 @@ state, so generate it outside Terraform and read it from your secret store.
 | `readonly_root_filesystem` | bool | `true` | Turn off only if the application writes to disk |
 | `min_capacity` / `max_capacity` | number | `2` / `6` | `max_capacity` is also your cost ceiling |
 | `enable_execute_command` | bool | `false` | A shell in production. Sessions are logged when on |
-| `enable_waf` | bool | `true` | |
-| `waf_rate_limit_forwarded_ip_header` | string | `null` | Set to `X-Forwarded-For` behind a CDN |
-| `origin_secret_header` | object | `null` | `{name, value}`. Requests without it get a 403 |
+| `origin_secret_header` | object | `null` | `{name, value}`. Added as a second condition on the rule |
 | `enable_alarms` | bool | `true` | Service health alarms |
 | `alarm_topic_arns` | list(string) | `[]` | Pass the topic from the account baseline |
-| `alarm_5xx_rate_percent` | number | `5` | |
 | `rollback_on_alarm` | bool | `true` | Roll back a deployment when the load balancer alarms fire |
 | `task_role_policy_json` | string | `null` | What your application code can do |
 | `additional_egress_rules` | list(object) | `[]` | The default is HTTPS out and DNS in the VPC |
 
-Every input is documented in [variables.tf](variables.tf).
+Every input is documented in [variables.tf](variables.tf) and
+[modules/alb/variables.tf](modules/alb/variables.tf).
 
 ## Outputs
 
-`alb_dns_name`, `alb_zone_id`, `alb_arn`, `alb_security_group_id`,
-`target_group_arn`, `cluster_name`, `service_name`, `task_security_group_id`,
-`task_role_arn`, `task_role_name`, `execution_role_arn`, `ecr_repository_url`,
-`log_group_name`, `access_logs_bucket`, `web_acl_arn`.
+`modules/alb`: `arn`, `dns_name`, `zone_id`, `listener_arn`, `arn_suffix`,
+`security_group_id`, `access_logs_bucket`, `web_acl_arn`.
+
+Root module: `target_group_arn`, `listener_rule_arn`, `cluster_name`,
+`service_name`, `task_security_group_id`, `task_role_arn`, `task_role_name`,
+`execution_role_arn`, `ecr_repository_url`, `log_group_name`.
+
+## Upgrading from v0.1.0
+
+In v0.1.0 every service created its own load balancer, WAF and access log
+bucket. From v0.2.0 those live in `modules/alb` and services share one.
+
+For a single service this is a rename, not a rebuild, if you move the state:
+
+```
+terraform state mv 'module.service.aws_lb.this' 'module.alb.aws_lb.this'
+terraform state mv 'module.service.aws_security_group.alb' 'module.alb.aws_security_group.this'
+terraform state mv 'module.service.aws_lb_listener.https' 'module.alb.aws_lb_listener.https'
+terraform state mv 'module.service.aws_lb_listener.http' 'module.alb.aws_lb_listener.http'
+terraform state mv 'module.service.aws_s3_bucket.access_logs' 'module.alb.aws_s3_bucket.access_logs'
+terraform state mv 'module.service.aws_wafv2_web_acl.this[0]' 'module.alb.aws_wafv2_web_acl.this[0]'
+```
+
+Then set the new required inputs on the service: `listener_arn`,
+`alb_security_group_id`, `alb_arn_suffix`, `host_headers` and
+`listener_rule_priority`. These inputs moved to `modules/alb` and are no longer
+accepted by the root module: `public_subnet_ids`, `certificate_arn`,
+`additional_certificate_arns`, `ssl_policy`, `internal`, `idle_timeout`,
+`enable_deletion_protection`, `access_logs_retention_days`, `alb_ingress_cidrs`,
+`alb_ingress_prefix_list_ids`, `enable_waf`, `waf_rate_limit`,
+`waf_managed_rule_groups`, `waf_rate_limit_forwarded_ip_header`.
+
+**Read the plan before applying.** If the state moves are wrong the plan
+destroys a live load balancer.
+
+One behaviour change worth knowing: the HTTPS listener's default action is now
+always a fixed 403. In v0.1.0 it forwarded to the service unless an origin
+secret was set. Traffic now reaches a service only if its host header matches a
+rule, so `host_headers` has to cover every hostname the service is meant to
+answer on.
 
 ## Notes on choices
 
@@ -226,7 +339,7 @@ a reasonable saving of about 9 dollars a month, but only once the origin lock
 above is in place.
 
 **Warnings rather than errors in two places.** The module warns, at plan time, if
-`alb_ingress_cidrs` contains `0.0.0.0/0` or if `container_image` ends in
+`ingress_cidrs` contains `0.0.0.0/0` or if `container_image` ends in
 `:latest`. Both are sometimes deliberate in a test environment, so they do not
 block. Read them.
 

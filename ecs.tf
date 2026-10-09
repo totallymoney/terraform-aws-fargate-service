@@ -46,7 +46,7 @@ resource "aws_security_group" "tasks" {
 resource "aws_vpc_security_group_ingress_rule" "tasks_from_alb" {
   security_group_id            = aws_security_group.tasks.id
   description                  = "From the load balancer"
-  referenced_security_group_id = aws_security_group.alb.id
+  referenced_security_group_id = var.alb_security_group_id
   from_port                    = var.container_port
   to_port                      = var.container_port
   ip_protocol                  = "tcp"
@@ -218,7 +218,8 @@ resource "aws_ecs_service" "this" {
     ignore_changes = [desired_count]
   }
 
-  depends_on = [aws_lb_listener.https]
+  # The rule has to exist before the service registers targets behind it.
+  depends_on = [aws_lb_listener_rule.this]
 }
 
 resource "aws_appautoscaling_target" "this" {
