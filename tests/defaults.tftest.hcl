@@ -1,4 +1,5 @@
 # Mocked provider, so this runs with no AWS account and no credentials.
+# The load balancer lives in modules/alb and has its own tests.
 
 mock_provider "aws" {
   mock_data "aws_caller_identity" {
@@ -17,19 +18,18 @@ mock_provider "aws" {
   mock_data "aws_vpc" {
     defaults = { cidr_block = "10.0.0.0/16" }
   }
-  mock_data "aws_elb_service_account" {
-    defaults = { arn = "arn:aws:iam::156460612806:root" }
-  }
 }
 
 variables {
-  name               = "example"
-  vpc_id             = "vpc-00000000000000000"
-  public_subnet_ids  = ["subnet-00000000000000001", "subnet-00000000000000002"]
-  private_subnet_ids = ["subnet-00000000000000003", "subnet-00000000000000004"]
-  certificate_arn    = "arn:aws:acm:eu-west-1:123456789012:certificate/00000000-0000-0000-0000-000000000000"
-  container_image    = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/example:v1"
-  alb_ingress_cidrs  = ["203.0.113.0/24"]
+  name                   = "example"
+  vpc_id                 = "vpc-00000000000000000"
+  private_subnet_ids     = ["subnet-00000000000000003", "subnet-00000000000000004"]
+  container_image        = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/example:v1"
+  listener_arn           = "arn:aws:elasticloadbalancing:eu-west-1:123456789012:listener/app/example-alb/0000000000000000/1111111111111111"
+  alb_security_group_id  = "sg-00000000000000000"
+  alb_arn_suffix         = "app/example-alb/0000000000000000"
+  host_headers           = ["www.example.com"]
+  listener_rule_priority = 100
 }
 
 run "tasks_are_not_reachable_from_the_internet" {
@@ -65,26 +65,37 @@ run "hardened_container_defaults" {
   }
 }
 
-run "tls_and_waf_defaults" {
+run "the_service_claims_only_its_own_hostnames" {
   command = plan
 
   assert {
-    condition     = aws_lb_listener.https.ssl_policy == "ELBSecurityPolicy-TLS13-1-2-2021-06"
-    error_message = "The listener must refuse anything older than TLS 1.2."
+    condition     = aws_lb_listener_rule.this.listener_arn == var.listener_arn
+    error_message = "The service must attach to the shared listener rather than create its own."
   }
 
   assert {
-    condition     = aws_lb.this.drop_invalid_header_fields == true
-    error_message = "Invalid headers must be dropped."
-  }
-
-  assert {
-    condition     = var.enable_waf == true
-    error_message = "WAF is on by default because the module cannot know what sits in front of it."
+    condition     = one(aws_lb_listener_rule.this.condition).host_header[0].values == toset(var.host_headers)
+    error_message = "Without a host header condition the rule would answer for every hostname on the shared listener."
   }
 }
 
-run "origin_secret_closes_the_listener_by_default" {
+run "only_this_service_is_opened_on_the_shared_security_group" {
+  command = plan
+
+  assert {
+    condition     = aws_vpc_security_group_egress_rule.alb_to_tasks.security_group_id == var.alb_security_group_id
+    error_message = "The path from the load balancer to these tasks must be opened on the shared group."
+  }
+
+  # Both security group ids are unknown until apply, so what is checkable here
+  # is that the opening is a single port rather than a range.
+  assert {
+    condition     = aws_vpc_security_group_egress_rule.alb_to_tasks.from_port == var.container_port && aws_vpc_security_group_egress_rule.alb_to_tasks.to_port == var.container_port
+    error_message = "The load balancer should reach the container port and nothing else."
+  }
+}
+
+run "origin_secret_is_required_by_the_rule" {
   command = plan
 
   variables {
@@ -92,23 +103,17 @@ run "origin_secret_closes_the_listener_by_default" {
   }
 
   assert {
-    condition     = aws_lb_listener.https.default_action[0].type == "fixed-response"
-    error_message = "With an origin secret set, anything without the header must be refused."
-  }
-
-  assert {
-    condition     = length(aws_lb_listener_rule.origin_secret) == 1
-    error_message = "The forwarding rule for correct requests is missing."
+    condition     = length(aws_lb_listener_rule.this.condition) == 2
+    error_message = "With an origin secret set, the rule must require the header as well as the hostname, otherwise anyone reaching the load balancer directly is served."
   }
 }
 
-run "an_unreachable_load_balancer_is_a_plan_error" {
+run "a_service_with_no_hostname_is_a_plan_error" {
   command = plan
 
   variables {
-    alb_ingress_cidrs           = []
-    alb_ingress_prefix_list_ids = []
+    host_headers = []
   }
 
-  expect_failures = [aws_security_group.alb]
+  expect_failures = [var.host_headers]
 }

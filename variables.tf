@@ -13,16 +13,6 @@ variable "vpc_id" {
   description = "VPC to build in."
 }
 
-variable "public_subnet_ids" {
-  type        = list(string)
-  description = "Subnets for the load balancer. At least two, in different AZs."
-
-  validation {
-    condition     = length(var.public_subnet_ids) >= 2
-    error_message = "A load balancer needs at least two subnets in different AZs."
-  }
-}
-
 variable "private_subnet_ids" {
   type        = list(string)
   description = "Subnets for the tasks. These should have no route to an internet gateway."
@@ -35,69 +25,9 @@ variable "private_subnet_ids" {
 
 # --- Who can reach the load balancer ---
 
-variable "alb_ingress_cidrs" {
-  type        = list(string)
-  description = <<-EOT
-    CIDRs allowed to reach the load balancer on 443.
-
-    If a CDN sits in front, put the CDN's ranges here and nothing else. Leaving
-    this open to 0.0.0.0/0 means the origin can be reached directly, which
-    bypasses the CDN's WAF, rate limiting and bot rules, and lets anyone who
-    finds the DNS name hit your application.
-  EOT
-  default     = []
-}
-
-variable "alb_ingress_prefix_list_ids" {
-  type        = list(string)
-  description = "Managed prefix lists allowed on 443. Use `com.amazonaws.global.cloudfront.origin-facing` when CloudFront is the CDN, so the list stays current on its own."
-  default     = []
-}
-
-variable "internal" {
-  type        = bool
-  description = "Make the load balancer internal. Set true when traffic arrives over a private link rather than from the internet."
-  default     = false
-}
-
 # --- TLS ---
 
-variable "certificate_arn" {
-  type        = string
-  description = "ACM certificate for the HTTPS listener."
-}
-
-variable "additional_certificate_arns" {
-  type        = list(string)
-  description = "Extra certificates on the same listener, for other hostnames."
-  default     = []
-}
-
-variable "ssl_policy" {
-  type        = string
-  description = "Listener TLS policy. The default allows TLS 1.3 and 1.2 and nothing older."
-  default     = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-}
-
 # --- Load balancer behaviour ---
-
-variable "enable_deletion_protection" {
-  type        = bool
-  description = "Stop the load balancer being deleted by accident."
-  default     = true
-}
-
-variable "idle_timeout" {
-  type        = number
-  description = "Seconds an idle connection is held open."
-  default     = 60
-}
-
-variable "access_logs_retention_days" {
-  type        = number
-  description = "Days to keep load balancer access logs."
-  default     = 90
-}
 
 # --- Container ---
 
@@ -243,28 +173,6 @@ variable "kms_key_arn" {
 
 # --- WAF ---
 
-variable "enable_waf" {
-  type        = bool
-  description = "Attach a WAF with the AWS managed baseline rule groups and a rate limit."
-  default     = true
-}
-
-variable "waf_rate_limit" {
-  type        = number
-  description = "Requests per five minutes from one IP before it is blocked."
-  default     = 2000
-}
-
-variable "waf_managed_rule_groups" {
-  type        = list(string)
-  description = "AWS managed rule groups, applied in order."
-  default = [
-    "AWSManagedRulesCommonRuleSet",
-    "AWSManagedRulesKnownBadInputsRuleSet",
-    "AWSManagedRulesAmazonIpReputationList",
-  ]
-}
-
 # --- ECR ---
 
 variable "create_ecr_repository" {
@@ -313,19 +221,6 @@ variable "cpu_architecture" {
   }
 }
 
-variable "waf_rate_limit_forwarded_ip_header" {
-  type        = string
-  description = <<-EOT
-    Header carrying the real client IP, used for rate limiting.
-
-    When a CDN sits in front, every request arrives from the CDN's addresses, so
-    an IP based rate limit counts all of your traffic as one client and never
-    fires. Set this to the header your CDN sends, usually X-Forwarded-For.
-    Leave null only when clients connect to the load balancer directly.
-  EOT
-  default     = null
-}
-
 variable "origin_secret_header" {
   type = object({
     name  = string
@@ -369,4 +264,41 @@ variable "rollback_on_alarm" {
   type        = bool
   description = "Roll a deployment back when the load balancer alarms fire. Without this a deployment only rolls back if tasks fail to start, so a release that starts cleanly and then returns errors stays up."
   default     = true
+}
+
+# --- Shared load balancer ---
+
+variable "listener_arn" {
+  type        = string
+  description = "HTTPS listener this service attaches to. Comes from the alb module's listener_arn output. Several services share one listener."
+}
+
+variable "alb_arn_suffix" {
+  type        = string
+  description = "Load balancer ARN suffix, from the alb module's arn_suffix output. Used as a CloudWatch dimension so this service's alarms measure traffic on the right load balancer."
+}
+
+variable "alb_security_group_id" {
+  type        = string
+  description = "Security group on the shared load balancer. This module adds one egress rule to it, to this service's tasks and nothing else."
+}
+
+variable "host_headers" {
+  type        = list(string)
+  description = "Hostnames this service answers on. A shared listener needs something to route on, so this has no default."
+
+  validation {
+    condition     = length(var.host_headers) > 0
+    error_message = "Give at least one hostname, otherwise no request can ever reach this service."
+  }
+}
+
+variable "listener_rule_priority" {
+  type        = number
+  description = "Rule priority on the shared listener. Must be unique across every service on it. Leave gaps, for example 100, 200, 300, so a service can be inserted later without renumbering the others."
+
+  validation {
+    condition     = var.listener_rule_priority >= 1 && var.listener_rule_priority <= 50000
+    error_message = "Listener rule priority must be between 1 and 50000."
+  }
 }

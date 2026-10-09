@@ -38,7 +38,7 @@ resource "aws_cloudwatch_metric_alarm" "target_5xx_rate" {
       period      = 60
       stat        = "Sum"
       dimensions = {
-        LoadBalancer = aws_lb.this.arn_suffix
+        LoadBalancer = var.alb_arn_suffix
         TargetGroup  = aws_lb_target_group.this.arn_suffix
       }
     }
@@ -53,7 +53,7 @@ resource "aws_cloudwatch_metric_alarm" "target_5xx_rate" {
       period      = 60
       stat        = "Sum"
       dimensions = {
-        LoadBalancer = aws_lb.this.arn_suffix
+        LoadBalancer = var.alb_arn_suffix
         TargetGroup  = aws_lb_target_group.this.arn_suffix
       }
     }
@@ -78,7 +78,7 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_targets" {
   tags                = local.tags
 
   dimensions = {
-    LoadBalancer = aws_lb.this.arn_suffix
+    LoadBalancer = var.alb_arn_suffix
     TargetGroup  = aws_lb_target_group.this.arn_suffix
   }
 }
